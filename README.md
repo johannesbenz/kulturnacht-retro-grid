@@ -8,10 +8,12 @@ Datei öffnen, Vollbild, läuft.
 | --- | --- |
 | [`01-retro-grid`](01-retro-grid/) | Synthwave-Sonnenuntergang: Neon-Grid bis zum Horizont, gestreifte Sonne, Sternenhimmel, Berge |
 | [`02-neon-tunnel`](02-neon-tunnel/) | Flug durch einen gewundenen Vektortunnel: verdrehte Neonringe, durchlaufende Farbbänder, Leuchtkern |
+| [`03-memphis-pop`](03-memphis-pop/) | Wanderndes Memphis-Muster: Zickzack, Kreise, Konfetti in Pink, Türkis und Gelb — hell oder dunkel |
 
-Die beiden sind bewusst unterschiedlich aufgebaut — das eine eine Landschaft
-mit Horizont, das andere eine radiale Komposition ohne festen Bezugspunkt —
-teilen sich aber Neonoptik, CRT-Scanlines und die Bedienung.
+Die drei sind bewusst unterschiedlich aufgebaut: eine Landschaft mit Horizont,
+eine radiale Komposition ohne festen Bezugspunkt und ein flächiges Muster ganz
+ohne Perspektive. Die ersten beiden teilen sich Neonoptik und CRT-Scanlines,
+das Memphis-Muster setzt bewusst dagegen.
 
 ## Bedienung (in beiden gleich)
 
@@ -21,16 +23,18 @@ teilen sich aber Neonoptik, CRT-Scanlines und die Bedienung.
 | `↑` / `↓` | schneller / langsamer |
 | Leertaste | Pause / weiter |
 
+`03-memphis-pop` hat zusätzlich `D` für hellen oder dunklen Untergrund.
+
 Zeiger und Bedienelemente blenden sich nach knapp drei Sekunden ohne Eingabe
 aus — gedacht für Beamer oder ein Display im Dauerbetrieb.
 
-Beide laufen ohne Anfang und Ende durch, und zwar nachweislich sprungfrei:
+Alle drei laufen ohne Anfang und Ende durch, und zwar nachweislich sprungfrei:
 alles Sichtbare hängt nur von der Position im Raum ab, nicht davon, das
 wievielte Element gerade dort steht. Details dazu stehen in den READMEs der
 jeweiligen Ordner.
 
 ## Anpassen
 
-In beiden Dateien stehen alle Stellschrauben gesammelt im Objekt `CFG` oben im
+In allen drei Dateien stehen alle Stellschrauben gesammelt im Objekt `CFG` oben im
 `<script>`-Block, die Farben direkt darunter. Der jeweilige Ordner-README
 erklärt die einzelnen Felder.
