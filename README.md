@@ -1,15 +1,19 @@
-# Retro Grid
+# Kulturnacht — Retro-Animationen
 
-Endlos laufende Retro-/Synthwave-Animation im Browser: Neon-Grid, das auf den
-Betrachter zuläuft, gestreifte Sonne über dem Horizont, Sternenhimmel,
-Bergsilhouetten und ein CRT-Scanline-Look.
+Zwei endlos laufende 80er-Animationen für den Browser. Beide sind je eine
+einzelne HTML-Datei: kein Build, keine Abhängigkeiten, kein Internet nötig.
+Datei öffnen, Vollbild, läuft.
 
-Eine einzige Datei, kein Build, keine Abhängigkeiten, kein Internet nötig.
+| Ordner | Was es ist |
+| --- | --- |
+| [`01-retro-grid`](01-retro-grid/) | Synthwave-Sonnenuntergang: Neon-Grid bis zum Horizont, gestreifte Sonne, Sternenhimmel, Berge |
+| [`02-neon-tunnel`](02-neon-tunnel/) | Flug durch einen gewundenen Vektortunnel: verdrehte Neonringe, durchlaufende Farbbänder, Leuchtkern |
 
-## Benutzen
+Die beiden sind bewusst unterschiedlich aufgebaut — das eine eine Landschaft
+mit Horizont, das andere eine radiale Komposition ohne festen Bezugspunkt —
+teilen sich aber Neonoptik, CRT-Scanlines und die Bedienung.
 
-`index.html` auf einem beliebigen Gerät im Browser öffnen — per Doppelklick
-aus dem Dateimanager, oder die Datei auf einen Webspace/USB-Stick legen.
+## Bedienung (in beiden gleich)
 
 | Eingabe | Wirkung |
 | --- | --- |
@@ -17,38 +21,16 @@ aus dem Dateimanager, oder die Datei auf einen Webspace/USB-Stick legen.
 | `↑` / `↓` | schneller / langsamer |
 | Leertaste | Pause / weiter |
 
-Bedienelemente und Mauszeiger blenden sich nach knapp drei Sekunden ohne
-Eingabe aus — praktisch für Beamer oder Dauerbetrieb auf einem Display.
+Zeiger und Bedienelemente blenden sich nach knapp drei Sekunden ohne Eingabe
+aus — gedacht für Beamer oder ein Display im Dauerbetrieb.
 
-Die Animation läuft ohne Anfang und Ende durch: die Querlinien werden mit
-gleichmäßigem Tiefenabstand erzeugt und zyklisch verschoben, deshalb gibt es
-beim Umlauf keinen sichtbaren Sprung.
+Beide laufen ohne Anfang und Ende durch, und zwar nachweislich sprungfrei:
+alles Sichtbare hängt nur von der Position im Raum ab, nicht davon, das
+wievielte Element gerade dort steht. Details dazu stehen in den READMEs der
+jeweiligen Ordner.
 
 ## Anpassen
 
-Alle Stellschrauben stehen im Objekt `CFG` oben im `<script>`-Block:
-
-| Feld | Bedeutung |
-| --- | --- |
-| `speed` | Grundtempo des Grids |
-| `horizon` | Höhe der Horizontlinie (Anteil der Bildhöhe) |
-| `rowStep` | Tiefenabstand der Querlinien |
-| `colDensity` | angestrebte Spaltenzahl über die Bildbreite |
-| `sunRadius`, `sunSink` | Größe der Sonne und wie tief sie hinterm Horizont steht |
-| `starCount`, `twinkleFrac` | Anzahl Sterne, Anteil davon flackernd |
-
-Die Farben des Grids liegen in den Konstanten `NEAR` (vorne, Cyan) und `FAR`
-(am Horizont, Magenta), die Himmels- und Sonnenverläufe in `paintSky()` bzw.
-`paintSun()`.
-
-## Technik
-
-Alles Unbewegte — Himmel, Sterne, Sonne, Berge, Horizontglühen und die
-Längslinien des Grids — wird bei Programmstart und nach jedem Resize einmal in
-Offscreen-Canvases gerendert. Pro Bild werden nur noch diese fertigen Ebenen
-kopiert und die wandernden Querlinien neu gezeichnet. Das ist rund doppelt so
-schnell wie eine vollständige Neuberechnung je Bild und hält auch ältere
-Geräte und Beamer-Notebooks bei flüssiger Darstellung.
-
-Horizont, Sonnengröße und Gitterdichte hängen am Seitenverhältnis, damit das
-Bild quer wie hochkant stimmt.
+In beiden Dateien stehen alle Stellschrauben gesammelt im Objekt `CFG` oben im
+`<script>`-Block, die Farben direkt darunter. Der jeweilige Ordner-README
+erklärt die einzelnen Felder.
