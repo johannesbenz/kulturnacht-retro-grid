@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#04010c">
+<meta name="description" content="Endlose 80er-Animation: Flug durch einen gewundenen Neon-Vektortunnel.">
+<title>Neon Tunnel</title>
+<style>
+  :root { color-scheme: dark; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #04010c;
+    overflow: hidden;
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body.idle { cursor: none; }
+
+  #stage { position: fixed; inset: 0; }
+  canvas { display: block; width: 100%; height: 100%; }
+
+  .overlay { position: fixed; inset: 0; pointer-events: none; }
+  .scanlines {
+    background: repeating-linear-gradient(
+      to bottom,
+      rgba(0,0,0,0) 0px, rgba(0,0,0,0) 2px,
+      rgba(0,0,0,.16) 3px, rgba(0,0,0,.16) 4px);
+    mix-blend-mode: multiply;
+    opacity: .5;
+  }
+  .vignette {
+    background: radial-gradient(ellipse 72% 72% at 50% 50%, rgba(0,0,0,0) 30%, rgba(0,0,0,.62) 100%);
+  }
+
+  #ui {
+    position: fixed;
+    right: max(16px, env(safe-area-inset-right));
+    bottom: max(16px, env(safe-area-inset-bottom));
+    display: flex; gap: 10px;
+    transition: opacity .4s ease;
+    z-index: 10;
+  }
+  body.idle #ui { opacity: 0; pointer-events: none; }
+
+  .btn {
+    font: 600 13px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: #c9a6ff;
+    background: rgba(10, 2, 30, .55);
+    border: 1px solid rgba(190, 130, 255, .45);
+    border-radius: 999px;
+    padding: 11px 18px;
+    cursor: pointer;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    text-shadow: 0 0 10px rgba(190, 130, 255, .8);
+    box-shadow: 0 0 14px rgba(190, 130, 255, .18), inset 0 0 14px rgba(190, 130, 255, .08);
+    transition: color .2s, border-color .2s, box-shadow .2s;
+  }
+  .btn:hover, .btn:focus-visible {
+    color: #7ffcf0;
+    border-color: rgba(90, 250, 230, .7);
+    box-shadow: 0 0 22px rgba(90, 250, 230, .35), inset 0 0 18px rgba(90, 250, 230, .12);
+    outline: none;
+  }
+
+  #hint {
+    position: fixed;
+    left: 50%; bottom: max(22px, env(safe-area-inset-bottom));
+    transform: translateX(-50%);
+    font: 500 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    letter-spacing: .18em;
+    text-transform: uppercase;
+    color: rgba(200, 190, 255, .45);
+    pointer-events: none;
+    transition: opacity .6s ease;
+    z-index: 9;
+  }
+  body.idle #hint { opacity: 0; }
+
+  @media (max-width: 560px) {
+    .btn { padding: 10px 14px; font-size: 11px; }
+    #hint { display: none; }
+  }
+</style>
+</head>
+<body>
+  <div id="stage"><canvas id="c"></canvas></div>
+  <div class="overlay scanlines"></div>
+  <div class="overlay vignette"></div>
+
+  <div id="ui"><button class="btn" id="fsBtn" type="button">Vollbild</button></div>
+  <div id="hint">Doppelklick oder F für Vollbild &nbsp;·&nbsp; ↑ ↓ Tempo &nbsp;·&nbsp; Leertaste Pause</div>
+
+<script>
+(() => {
+  'use strict';
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+
+  // ---------------------------------------------------------------- Konfiguration
+  const CFG = {
+    sides:      8,      // Ecken je Ring - kleiner = kantiger, mehr Vektor-Optik
+    ringStep:   0.55,   // Tiefenabstand der Ringe
+    ringCount:  44,     // Anzahl gleichzeitig gezeichneter Ringe
+    zNear:      0.38,   // näher heran wird nicht mehr gezeichnet
+    radius:     1.0,    // Tunnelradius in Weltkoordinaten
+    fov:        0.62,   // Brennweite als Anteil der kürzeren Bildkante
+    speed:      2.30,   // Fluggeschwindigkeit
+
+    twistZ:     0.155,  // Verdrehung pro Tiefeneinheit - macht die Wendel
+    spin:       0.22,   // zusätzliche Eigendrehung pro Sekunde
+
+    driftAmpX:  0.62,   // wie weit der Tunnel seitlich wegknickt
+    driftAmpY:  0.46,
+    driftFreqX: 0.20,   // Windungen pro Tiefeneinheit
+    driftFreqY: 0.16,
+    driftSpdX:  0.50,   // wie schnell sich die Krümmung verändert
+    driftSpdY:  0.39,
+
+    colorCycle: 6,      // nach so vielen Ringen wiederholt sich die Farbe
+    starCount:  150     // mitfliegende Lichtpunkte
+  };
+
+  // Neonpalette, zyklisch durchlaufen
+  const PAL = [
+    [  0, 246, 236],   // Cyan
+    [ 74, 132, 255],   // Blau
+    [186,  70, 255],   // Violett
+    [255,  48, 168],   // Magenta
+    [255, 132,  64]    // Orange
+  ];
+
+  // ---------------------------------------------------------------- Zustand
+  let W = 0, H = 0, dpr = 1, cx = 0, cy = 0, focal = 0;
+  let speedMul = 1, lastT = 0;
+  let dist = 0;             // zurückgelegte Strecke, treibt Ringe und Farbe
+  let spinPh = 0, driftPhX = 0, driftPhY = 0;
+  let stars = [];
+  let glowRadius = 0;
+  let bloomA = null, bloomB = null;   // zwei Stufen für den Leuchtschleier
+  const TAU = Math.PI * 2;
+
+  const clamp = (v, a, b) => v < a ? a : (v > b ? b : v);
+  const rand = (a, b) => a + Math.random() * (b - a);
+
+  const zSpan = () => CFG.zNear + CFG.ringCount * CFG.ringStep;
+  const zFadeEnd = () => (CFG.ringCount - 1) * CFG.ringStep;
+  const colorPeriod = () => CFG.colorCycle * CFG.ringStep;
+
+  // Farbe hängt nur von der Tiefe ab (plus global wandernder Phase).
+  // Dadurch sieht ein Ring an Position z immer gleich aus - egal welcher
+  // Ring gerade dort steht. Genau das macht den Umlauf sprungfrei.
+  function tunnelColor(z) {
+    const u = (((z + dist) / colorPeriod()) % 1 + 1) % 1;
+    const f = u * PAL.length;
+    const i = Math.floor(f);
+    const k = f - i;
+    const a = PAL[i % PAL.length], b = PAL[(i + 1) % PAL.length];
+    return [
+      Math.round(a[0] + (b[0] - a[0]) * k),
+      Math.round(a[1] + (b[1] - a[1]) * k),
+      Math.round(a[2] + (b[2] - a[2]) * k)
+    ];
+  }
+
+  // Wie stark der Tunnel bei Tiefe z aus der Bildmitte wandert.
+  // Direkt vor der Kamera ist der Versatz null, sonst säße man in der Wand.
+  const driftRamp = (z) => clamp((z - 0.5) / 5, 0, 1);
+  const driftX = (z) => CFG.driftAmpX * Math.sin(z * CFG.driftFreqX + driftPhX) * driftRamp(z);
+  const driftY = (z) => CFG.driftAmpY * Math.sin(z * CFG.driftFreqY + driftPhY + 1.7) * driftRamp(z);
+  const twist  = (z) => z * CFG.twistZ + spinPh;
+
+  // ---------------------------------------------------------------- Aufbau
+  function buildStars() {
+    stars = [];
+    const n = Math.round(CFG.starCount * clamp((W * H) / (1600 * 900), 0.5, 1.8));
+    const span = zSpan();
+    for (let i = 0; i < n; i++) {
+      stars.push({
+        a: Math.random() * TAU,
+        r: CFG.radius * Math.sqrt(Math.random()) * 0.88,
+        z: CFG.zNear + Math.random() * (span - CFG.zNear),
+        b: rand(0.35, 1)
+      });
+    }
+  }
+
+  function makeBuffer(div) {
+    const el = document.createElement('canvas');
+    el.width  = Math.max(1, Math.round(W * dpr / div));
+    el.height = Math.max(1, Math.round(H * dpr / div));
+    return { el: el, c: el.getContext('2d') };
+  }
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = Math.max(1, window.innerWidth);
+    H = Math.max(1, window.innerHeight);
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    cx = W / 2;
+    cy = H / 2;
+    focal = Math.min(W, H) * CFG.fov;
+
+    buildStars();
+    glowRadius = Math.min(W, H) * 0.30;
+
+    // Bloom entsteht durch Verkleinern und wieder Vergrößern: die Interpolation
+    // beim Hochskalieren wirkt wie eine Weichzeichnung, kostet aber fast nichts.
+    bloomA = makeBuffer(4);
+    bloomB = makeBuffer(9);
+  }
+
+  // ---------------------------------------------------------------- Zeichnen
+  // Fluchtpunkt: dorthin läuft der Tunnel am fernen Ende zusammen
+  function vanishPoint() {
+    const z = zSpan();
+    return [cx + focal * driftX(z) / z, cy + focal * driftY(z) / z];
+  }
+
+  function drawGlow(t) {
+    const vp = vanishPoint();
+    const col = tunnelColor(zSpan());
+    const rgb = col[0] + ',' + col[1] + ',' + col[2];
+    const pulse = 0.78 + 0.22 * Math.sin(t * 1.1);
+    const R1 = glowRadius;
+
+    ctx.globalCompositeOperation = 'lighter';
+
+    // Weiter, farbiger Schein um das ferne Tunnelende
+    const g1 = ctx.createRadialGradient(vp[0], vp[1], 0, vp[0], vp[1], R1);
+    g1.addColorStop(0.00, 'rgba(' + rgb + ',' + (0.50 * pulse).toFixed(3) + ')');
+    g1.addColorStop(0.16, 'rgba(' + rgb + ',' + (0.26 * pulse).toFixed(3) + ')');
+    g1.addColorStop(0.45, 'rgba(' + rgb + ',' + (0.08 * pulse).toFixed(3) + ')');
+    g1.addColorStop(1.00, 'rgba(' + rgb + ',0)');
+    ctx.fillStyle = g1;
+    ctx.fillRect(vp[0] - R1, vp[1] - R1, R1 * 2, R1 * 2);
+
+    // Kleiner heller Kern, weich auslaufend - kein harter Rand
+    const R2 = R1 * 0.20;
+    const g2 = ctx.createRadialGradient(vp[0], vp[1], 0, vp[0], vp[1], R2);
+    g2.addColorStop(0.00, 'rgba(255,255,255,' + (0.34 * pulse).toFixed(3) + ')');
+    g2.addColorStop(0.30, 'rgba(' + rgb + ',' + (0.34 * pulse).toFixed(3) + ')');
+    g2.addColorStop(1.00, 'rgba(' + rgb + ',0)');
+    ctx.fillStyle = g2;
+    ctx.fillRect(vp[0] - R2, vp[1] - R2, R2 * 2, R2 * 2);
+
+    ctx.globalAlpha = 1;
+  }
+
+  function drawStars(dt) {
+    const span = zSpan();
+    const adv = dt * CFG.speed * speedMul;
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineCap = 'round';
+
+    for (let i = 0; i < stars.length; i++) {
+      const s = stars[i];
+      s.z -= adv;
+      // Recycling passiert direkt an der Kamera bzw. ganz hinten - unsichtbar
+      if (s.z < CFG.zNear) s.z += span - CFG.zNear;
+
+      const z0 = s.z;
+      const z1 = z0 + Math.max(0.06, adv * 2.2);   // Streifen in Flugrichtung
+      if (z1 > span) continue;
+
+      const ca = Math.cos(s.a), sa = Math.sin(s.a);
+      const x0 = cx + focal * (s.r * ca + driftX(z0)) / z0;
+      const y0 = cy + focal * (s.r * sa + driftY(z0)) / z0;
+      const x1 = cx + focal * (s.r * ca + driftX(z1)) / z1;
+      const y1 = cy + focal * (s.r * sa + driftY(z1)) / z1;
+
+      const fade = clamp((span - z0) / (span * 0.6), 0, 1) * clamp((z0 - CFG.zNear) / 1.2, 0, 1);
+      ctx.strokeStyle = 'rgba(214,236,255,' + (0.5 * fade * s.b).toFixed(3) + ')';
+      ctx.lineWidth = clamp(2.2 / z0, 0.5, 2.4);
+      ctx.beginPath();
+      ctx.moveTo(x0, y0);
+      ctx.lineTo(x1, y1);
+      ctx.stroke();
+    }
+  }
+
+  function drawTunnel() {
+    const n = CFG.sides;
+    const span = zSpan();
+    const zEnd = zFadeEnd();
+    const offset = dist % CFG.ringStep;
+    const px = new Float32Array(n), py = new Float32Array(n);
+    let qx = null, qy = null;         // zuvor berechneter, weiter entfernter Ring
+
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+
+    // Von hinten nach vorn, damit nahe Ringe oben liegen
+    for (let i = CFG.ringCount; i >= 1; i--) {
+      const z = i * CFG.ringStep - offset;
+      if (z < CFG.zNear || z > span) { qx = null; continue; }
+
+      const rot = twist(z);
+      const dx = driftX(z), dy = driftY(z);
+      const scale = focal / z;
+
+      for (let j = 0; j < n; j++) {
+        const a = rot + (j / n) * TAU;
+        px[j] = cx + (CFG.radius * Math.cos(a) + dx) * scale;
+        py[j] = cy + (CFG.radius * Math.sin(a) + dy) * scale;
+      }
+
+      // Ausblenden ganz hinten und kurz bevor der Ring die Kamera passiert
+      const fade = clamp((zEnd - z) / (zEnd * 0.45), 0, 1)
+                 * clamp((z - CFG.zNear) / (CFG.ringStep * 2.2), 0, 1);
+      if (fade > 0.004) {
+        const col = tunnelColor(z);
+        const rgb = col[0] + ',' + col[1] + ',' + col[2];
+
+        // Ringpolygon
+        ctx.beginPath();
+        ctx.moveTo(px[0], py[0]);
+        for (let j = 1; j < n; j++) ctx.lineTo(px[j], py[j]);
+        ctx.closePath();
+
+        ctx.strokeStyle = 'rgba(' + rgb + ',' + (0.16 * fade).toFixed(3) + ')';
+        ctx.lineWidth = clamp(9 / z, 2.5, 16);
+        ctx.stroke();
+
+        ctx.strokeStyle = 'rgba(' + rgb + ',' + (0.92 * fade).toFixed(3) + ')';
+        ctx.lineWidth = clamp(2.6 / z, 0.9, 3.2);
+        ctx.stroke();
+
+        // Längsstreben zum dahinterliegenden Ring
+        if (qx) {
+          ctx.beginPath();
+          for (let j = 0; j < n; j++) {
+            ctx.moveTo(px[j], py[j]);
+            ctx.lineTo(qx[j], qy[j]);
+          }
+          ctx.strokeStyle = 'rgba(' + rgb + ',' + (0.40 * fade).toFixed(3) + ')';
+          ctx.lineWidth = clamp(1.6 / z, 0.6, 2.0);
+          ctx.stroke();
+        }
+      }
+
+      if (!qx) { qx = new Float32Array(n); qy = new Float32Array(n); }
+      qx.set(px); qy.set(py);
+    }
+  }
+
+  // Fertiges Bild zweimal verkleinert ablegen und additiv zurückblenden.
+  // Das gibt den Linien den Neon-Schein, ohne jede Linie mehrfach zu zeichnen.
+  function drawBloom() {
+    bloomA.c.globalCompositeOperation = 'copy';
+    bloomA.c.drawImage(canvas, 0, 0, bloomA.el.width, bloomA.el.height);
+    bloomB.c.globalCompositeOperation = 'copy';
+    bloomB.c.drawImage(bloomA.el, 0, 0, bloomB.el.width, bloomB.el.height);
+
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.60;
+    ctx.drawImage(bloomA.el, 0, 0, W, H);
+    ctx.globalAlpha = 0.50;
+    ctx.drawImage(bloomB.el, 0, 0, W, H);
+    ctx.globalAlpha = 1;
+  }
+
+  // ---------------------------------------------------------------- Loop
+  function frame(now) {
+    const t = now / 1000;
+    let dt = lastT ? t - lastT : 0;
+    lastT = t;
+    if (dt > 0.1) dt = 0.1;         // nach einem Tab-Wechsel nicht springen
+
+    const adv = dt * CFG.speed * speedMul;
+    dist += adv;
+    // Phasen umlaufend halten, damit auch nach Stunden nichts ausfranst
+    if (dist > colorPeriod() * 4096) dist %= colorPeriod();
+    spinPh   = (spinPh   + dt * CFG.spin)      % TAU;
+    driftPhX = (driftPhX + dt * CFG.driftSpdX) % TAU;
+    driftPhY = (driftPhY + dt * CFG.driftSpdY) % TAU;
+
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#04010c';
+    ctx.fillRect(0, 0, W, H);
+
+    drawGlow(t);
+    drawStars(dt);
+    drawTunnel();
+    drawBloom();
+
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    requestAnimationFrame(frame);
+  }
+
+  // ---------------------------------------------------------------- Bedienung
+  const fsBtn = document.getElementById('fsBtn');
+  const isFullscreen = () => !!(document.fullscreenElement || document.webkitFullscreenElement);
+
+  function toggleFullscreen() {
+    const el = document.documentElement;
+    if (isFullscreen()) {
+      const exit = document.exitFullscreen || document.webkitExitFullscreen;
+      if (exit) exit.call(document);
+    } else {
+      const req = el.requestFullscreen || el.webkitRequestFullscreen;
+      if (req) {
+        const p = req.call(el, { navigationUI: 'hide' });
+        if (p && p.catch) p.catch(() => {});
+      }
+    }
+  }
+  function syncBtn() { fsBtn.textContent = isFullscreen() ? 'Beenden' : 'Vollbild'; }
+
+  fsBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleFullscreen(); });
+  document.addEventListener('fullscreenchange', syncBtn);
+  document.addEventListener('webkitfullscreenchange', syncBtn);
+  document.addEventListener('dblclick', toggleFullscreen);
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'f' || e.key === 'F') toggleFullscreen();
+    else if (e.key === 'ArrowUp')   { speedMul = clamp(speedMul * 1.25, 0.1, 8); e.preventDefault(); }
+    else if (e.key === 'ArrowDown') { speedMul = clamp(speedMul / 1.25, 0.1, 8); e.preventDefault(); }
+    else if (e.key === ' ')         { speedMul = speedMul === 0 ? 1 : 0; e.preventDefault(); }
+  });
+
+  let idleTimer = 0;
+  function wake() {
+    document.body.classList.remove('idle');
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => document.body.classList.add('idle'), 2800);
+  }
+  ['pointermove', 'pointerdown', 'keydown', 'wheel'].forEach(ev =>
+    window.addEventListener(ev, wake, { passive: true }));
+
+  let rsTimer = 0;
+  window.addEventListener('resize', () => {
+    clearTimeout(rsTimer);
+    rsTimer = setTimeout(resize, 120);
+  });
+  window.addEventListener('orientationchange', () => setTimeout(resize, 200));
+
+  resize();
+  syncBtn();
+  wake();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

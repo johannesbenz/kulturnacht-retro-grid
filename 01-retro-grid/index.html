@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a0320">
+<meta name="description" content="Endlose Retro-/Synthwave-Animation: Neon-Grid, Sonnenuntergang, Sternenhimmel.">
+<title>Retro Grid</title>
+<style>
+  :root { color-scheme: dark; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #05010f;
+    overflow: hidden;
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body.idle { cursor: none; }
+
+  #stage { position: fixed; inset: 0; }
+  canvas { display: block; width: 100%; height: 100%; }
+
+  /* CRT-Scanlines und Vignette als CSS-Overlays - kosten keine Rechenzeit pro Bild */
+  .overlay { position: fixed; inset: 0; pointer-events: none; }
+  .scanlines {
+    background: repeating-linear-gradient(
+      to bottom,
+      rgba(0,0,0,0) 0px, rgba(0,0,0,0) 2px,
+      rgba(0,0,0,.18) 3px, rgba(0,0,0,.18) 4px);
+    mix-blend-mode: multiply;
+    opacity: .55;
+  }
+  .vignette {
+    background: radial-gradient(ellipse 78% 68% at 50% 50%, rgba(0,0,0,0) 42%, rgba(0,0,0,.5) 100%);
+  }
+
+  #ui {
+    position: fixed;
+    right: max(16px, env(safe-area-inset-right));
+    bottom: max(16px, env(safe-area-inset-bottom));
+    display: flex; gap: 10px;
+    transition: opacity .4s ease;
+    z-index: 10;
+  }
+  body.idle #ui { opacity: 0; pointer-events: none; }
+
+  .btn {
+    font: 600 13px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: #9ff6ff;
+    background: rgba(12, 4, 36, .55);
+    border: 1px solid rgba(120, 240, 255, .45);
+    border-radius: 999px;
+    padding: 11px 18px;
+    cursor: pointer;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    text-shadow: 0 0 10px rgba(120, 240, 255, .8);
+    box-shadow: 0 0 14px rgba(120, 240, 255, .18), inset 0 0 14px rgba(120, 240, 255, .08);
+    transition: color .2s, border-color .2s, box-shadow .2s;
+  }
+  .btn:hover, .btn:focus-visible {
+    color: #ff9de6;
+    border-color: rgba(255, 110, 210, .7);
+    box-shadow: 0 0 22px rgba(255, 110, 210, .35), inset 0 0 18px rgba(255, 110, 210, .12);
+    outline: none;
+  }
+
+  #hint {
+    position: fixed;
+    left: 50%; bottom: max(22px, env(safe-area-inset-bottom));
+    transform: translateX(-50%);
+    font: 500 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    letter-spacing: .18em;
+    text-transform: uppercase;
+    color: rgba(190, 220, 255, .5);
+    pointer-events: none;
+    transition: opacity .6s ease;
+    z-index: 9;
+  }
+  body.idle #hint { opacity: 0; }
+
+  @media (max-width: 560px) {
+    .btn { padding: 10px 14px; font-size: 11px; }
+    #hint { display: none; }
+  }
+</style>
+</head>
+<body>
+  <div id="stage"><canvas id="c"></canvas></div>
+  <div class="overlay scanlines"></div>
+  <div class="overlay vignette"></div>
+
+  <div id="ui"><button class="btn" id="fsBtn" type="button">Vollbild</button></div>
+  <div id="hint">Doppelklick oder F für Vollbild &nbsp;·&nbsp; ↑ ↓ Tempo &nbsp;·&nbsp; Leertaste Pause</div>
+
+<script>
+(() => {
+  'use strict';
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+
+  // ---------------------------------------------------------------- Konfiguration
+  const CFG = {
+    horizon:     0.455,   // Horizontlinie als Anteil der Höhe (quer)
+    camHeight:   0.90,    // skaliert die Tiefenstaffelung des Bodens
+    rowStep:     1.15,    // Abstand der Querlinien in Welt-Tiefe
+    rowCount:    90,      // Obergrenze gezeichneter Querlinien
+    colsPerHalf: 90,      // Obergrenze Längslinien je Seite (wird gecullt)
+    colDensity:  26,      // angestrebte Spaltenzahl über die Bildbreite
+    speed:       1.55,    // Grundtempo
+    starCount:   340,
+    twinkleFrac: 0.30,    // Anteil der Sterne, der wirklich flackert
+    sunRadius:   0.165,   // Sonnenradius als Anteil der Höhe
+    sunSink:     0.30     // wie tief die Sonne hinterm Horizont steckt (Anteil r)
+  };
+
+  const NEAR = [0.35, 1.00, 0.98];  // Cyan, vorne
+  const FAR  = [1.00, 0.24, 0.80];  // Magenta, am Horizont
+
+  // ---------------------------------------------------------------- Zustand
+  let W = 0, H = 0, dpr = 1;
+  let horizonY = 0, focal = 0, colW = 1, sunR = 0;
+  let speedMul = 1, zOffset = 0, lastT = 0;
+  let twinklers = [];
+  // Vorgerenderte Ebenen: alles, was sich nicht bewegt, wird genau einmal gezeichnet
+  let bgLayer = null;    // Himmel, Sterne, Sonne, Berge, Horizontglühen, Boden
+  let colLayer = null;   // Längslinien des Grids (stehen fest) + Bodenreflex
+
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const clamp = (v, a, b) => v < a ? a : (v > b ? b : v);
+
+  function mixColor(t) {
+    const r = Math.round(255 * (NEAR[0] + (FAR[0] - NEAR[0]) * t));
+    const g = Math.round(255 * (NEAR[1] + (FAR[1] - NEAR[1]) * t));
+    const b = Math.round(255 * (NEAR[2] + (FAR[2] - NEAR[2]) * t));
+    return r + ',' + g + ',' + b;
+  }
+
+  function newLayer() {
+    const el = document.createElement('canvas');
+    el.width = Math.round(W * dpr);
+    el.height = Math.round(H * dpr);
+    const c = el.getContext('2d');
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { el: el, c: c };
+  }
+
+  // ---------------------------------------------------------------- Ebenen bauen
+  function paintSky(c) {
+    const g = c.createLinearGradient(0, 0, 0, horizonY);
+    g.addColorStop(0.00, '#07021a');
+    g.addColorStop(0.45, '#15063a');
+    g.addColorStop(0.78, '#3a0c5e');
+    g.addColorStop(1.00, '#6a1173');
+    c.fillStyle = g;
+    c.fillRect(0, 0, W, horizonY + 1);
+
+    const gb = c.createLinearGradient(0, horizonY, 0, H);
+    gb.addColorStop(0.00, '#2b0742');
+    gb.addColorStop(0.35, '#150425');
+    gb.addColorStop(1.00, '#08010f');
+    c.fillStyle = gb;
+    c.fillRect(0, horizonY, W, H - horizonY + 1);
+  }
+
+  function paintStars(c) {
+    twinklers = [];
+    const n = Math.round(CFG.starCount * clamp((W * H) / (1600 * 900), 0.45, 2.2));
+    c.globalCompositeOperation = 'lighter';
+    c.fillStyle = '#dff1ff';
+    for (let i = 0; i < n; i++) {
+      const y = Math.pow(Math.random(), 1.35) * horizonY * 0.97;
+      const s = {
+        x: Math.random() * W,
+        y: y,
+        r: rand(0.5, 1.7),
+        a: rand(0.25, 0.95) * clamp(1 - y / horizonY * 0.35, 0.4, 1),
+        sp: rand(0.6, 2.6),
+        ph: Math.random() * Math.PI * 2
+      };
+      const flickers = Math.random() < CFG.twinkleFrac;
+      // Flackernde Sterne kommen mit ihrer Grundhelligkeit in die Ebene,
+      // die Schwankung wird pro Bild additiv obendrauf gezeichnet.
+      c.globalAlpha = flickers ? s.a * 0.62 : s.a;
+      c.beginPath();
+      c.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      c.fill();
+      if (flickers) twinklers.push(s);
+    }
+    c.globalAlpha = 1;
+    c.globalCompositeOperation = 'source-over';
+  }
+
+  function paintSun(c) {
+    const r = sunR;
+    const cx = W / 2;
+    const cy = horizonY - r * (1 - CFG.sunSink);
+
+    c.save();
+    c.beginPath();            // nichts von der Sonne darf unter den Horizont ragen
+    c.rect(0, 0, W, horizonY);
+    c.clip();
+
+    c.globalCompositeOperation = 'lighter';
+    const halo = c.createRadialGradient(cx, cy, r * 0.35, cx, cy, r * 3.1);
+    halo.addColorStop(0.00, 'rgba(255,120,190,.50)');
+    halo.addColorStop(0.28, 'rgba(226,60,190,.26)');
+    halo.addColorStop(0.62, 'rgba(120,40,190,.10)');
+    halo.addColorStop(1.00, 'rgba(60,20,120,0)');
+    c.fillStyle = halo;
+    c.fillRect(cx - r * 3.4, cy - r * 3.4, r * 6.8, r * 6.8);
+    c.globalCompositeOperation = 'source-over';
+
+    // Scheibe mit Verlauf, danach die Streifen ausstanzen
+    const size = Math.ceil(r * 2) + 4;
+    const s = document.createElement('canvas');
+    s.width = size; s.height = size;
+    const sc = s.getContext('2d');
+    const m = size / 2;
+
+    const g = sc.createLinearGradient(0, m - r, 0, m + r);
+    g.addColorStop(0.00, '#fff3a8');
+    g.addColorStop(0.18, '#ffd447');
+    g.addColorStop(0.42, '#ff8a3c');
+    g.addColorStop(0.64, '#ff3f86');
+    g.addColorStop(0.85, '#e92ec4');
+    g.addColorStop(1.00, '#b520d8');
+    sc.fillStyle = g;
+    sc.beginPath();
+    sc.arc(m, m, r, 0, Math.PI * 2);
+    sc.fill();
+
+    sc.globalCompositeOperation = 'destination-out';
+    sc.fillStyle = '#000';
+    let y = m - r * 0.10;        // Streifen beginnen erst unterhalb der Mitte
+    let gap = r * 0.020;
+    let band = r * 0.115;
+    while (y < m + r) {
+      sc.fillRect(0, y, size, gap);
+      y += gap + band;
+      gap *= 1.30;               // Lücken werden nach unten breiter
+      band *= 0.90;              // Bänder schmaler
+    }
+
+    c.drawImage(s, cx - size / 2, cy - size / 2);
+    c.restore();
+  }
+
+  // Zwei gezackte Bergketten, in der Bildmitte flach, damit die Sonne frei steht
+  function paintRidges(c) {
+    const layers = [
+      { h: 0.105, off: 0.004, col: 'rgba(72, 30, 118, .95)' },
+      { h: 0.070, off: 0.000, col: 'rgba(46, 18, 84, .95)'  }
+    ];
+    for (const L of layers) {
+      const base = horizonY + L.off * H;
+      const seg = Math.max(10, Math.round(W / 42));
+      c.beginPath();
+      c.moveTo(0, base);
+      for (let i = 0; i <= seg; i++) {
+        const x = i / seg;
+        const center = 1 - Math.pow(clamp(Math.abs(x - 0.5) / 0.34, 0, 1), 1.6);
+        const n = Math.sin(x * 37.1 + L.h * 91) * 0.5
+                + Math.sin(x * 13.7 + 2.1) * 0.35
+                + Math.sin(x * 71.3 + 4.7) * 0.15;
+        const amp = (0.45 + 0.55 * (n * 0.5 + 0.5)) * (1 - center);
+        c.lineTo(x * W, base - amp * L.h * H);
+      }
+      c.lineTo(W, base);
+      c.closePath();
+      c.fillStyle = L.col;
+      c.fill();
+    }
+  }
+
+  function paintHorizonGlow(c) {
+    const cx = W / 2;
+    // Elliptisches Glühen, am hellsten direkt unter der Sonne
+    c.save();
+    c.globalCompositeOperation = 'lighter';
+    c.translate(cx, horizonY);
+    c.scale(W * 0.62, H * 0.085);
+    const hg = c.createRadialGradient(0, 0, 0, 0, 0, 1);
+    hg.addColorStop(0.00, 'rgba(255,200,245,.42)');
+    hg.addColorStop(0.16, 'rgba(255,120,215,.26)');
+    hg.addColorStop(0.44, 'rgba(226,70,215,.12)');
+    hg.addColorStop(1.00, 'rgba(140,30,200,0)');
+    c.fillStyle = hg;
+    c.fillRect(-1, -1, 2, 2);
+    c.restore();
+
+    // schmale, weiche Horizontlinie über die volle Breite
+    c.globalCompositeOperation = 'lighter';
+    const lg = c.createLinearGradient(0, horizonY - H * 0.012, 0, horizonY + H * 0.012);
+    lg.addColorStop(0.00, 'rgba(230,90,220,0)');
+    lg.addColorStop(0.50, 'rgba(255,150,230,.16)');
+    lg.addColorStop(1.00, 'rgba(160,50,220,0)');
+    c.fillStyle = lg;
+    c.fillRect(0, horizonY - H * 0.012, W, H * 0.024);
+    c.globalCompositeOperation = 'source-over';
+  }
+
+  // Längslinien stehen fest - einmal rendern, pro Bild nur noch additiv drüberlegen
+  function paintColumns(c) {
+    const K = focal;
+    const bottomZ = K / (H * 1.25 - horizonY);
+    const zBottom = K / (H - horizonY);
+    const vpx = W / 2;
+    const yNear = horizonY + K / bottomZ;
+
+    c.save();
+    c.beginPath();
+    c.rect(0, horizonY, W, H - horizonY);
+    c.clip();
+    c.lineCap = 'round';
+
+    for (let k = 0; k <= CFG.colsPerHalf; k++) {
+      // Sobald eine Linie die Bildunterkante außerhalb verlässt, sind wir fertig
+      if (k !== 0 && (focal * (k * colW)) / zBottom > W * 0.62) break;
+      const dx = (focal * (k * colW)) / bottomZ;
+
+      for (const sgn of (k === 0 ? [1] : [1, -1])) {
+        const xNear = vpx + sgn * dx;
+        const grad = c.createLinearGradient(vpx, horizonY, xNear, yNear);
+        grad.addColorStop(0.00, 'rgba(' + mixColor(1) + ',0)');
+        grad.addColorStop(0.07, 'rgba(' + mixColor(0.80) + ',.26)');
+        grad.addColorStop(0.22, 'rgba(' + mixColor(0.30) + ',.62)');
+        grad.addColorStop(1.00, 'rgba(' + mixColor(0) + ',.95)');
+        c.strokeStyle = grad;
+
+        c.lineWidth = 6;                       // weicher Schein
+        c.globalAlpha = 0.09;
+        c.beginPath(); c.moveTo(vpx, horizonY); c.lineTo(xNear, yNear); c.stroke();
+
+        c.globalAlpha = 1;                     // harter Kern
+        c.lineWidth = 1.5;
+        c.beginPath(); c.moveTo(vpx, horizonY); c.lineTo(xNear, yNear); c.stroke();
+      }
+    }
+
+    // Bodenreflex der Sonne - additiv, liegt daher richtig über den Querlinien
+    const refl = c.createLinearGradient(0, horizonY, 0, horizonY + (H - horizonY) * 0.55);
+    refl.addColorStop(0, 'rgba(255,90,200,.16)');
+    refl.addColorStop(1, 'rgba(255,90,200,0)');
+    c.fillStyle = refl;
+    c.fillRect(0, horizonY, W, (H - horizonY) * 0.55);
+    c.restore();
+  }
+
+  // ---------------------------------------------------------------- Resize
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = Math.max(1, window.innerWidth);
+    H = Math.max(1, window.innerHeight);
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    const aspect = W / H;
+    // Hochkant den Horizont anheben, damit mehr Grid im Bild bleibt
+    horizonY = Math.round(H * (aspect < 1 ? CFG.horizon - 0.055 : CFG.horizon));
+    focal = H * CFG.camHeight;
+    // Sonne darf auf schmalen Displays nicht das ganze Bild füllen
+    sunR = Math.min(H * CFG.sunRadius, W * 0.21);
+    // Spaltenabstand an die Bildbreite koppeln, sonst wird es auf dem Handy zu dicht
+    const density = clamp(Math.round(W / 56), 11, CFG.colDensity);
+    colW = (W / density) * CFG.rowStep / focal;
+
+    bgLayer = newLayer();
+    paintSky(bgLayer.c);
+    paintStars(bgLayer.c);
+    paintSun(bgLayer.c);
+    paintRidges(bgLayer.c);
+    paintHorizonGlow(bgLayer.c);
+
+    colLayer = newLayer();
+    paintColumns(colLayer.c);
+  }
+
+  // ---------------------------------------------------------------- Pro Bild
+  function drawTwinkle(t) {
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = '#dff1ff';
+    for (let i = 0; i < twinklers.length; i++) {
+      const s = twinklers[i];
+      ctx.globalAlpha = s.a * 0.38 * (0.5 + 0.5 * Math.sin(t * s.sp + s.ph));
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  // Nur die Querlinien bewegen sich, also wird auch nur sie pro Bild neu gezeichnet
+  function drawRows() {
+    const K = focal;
+    const step = CFG.rowStep;
+    const bottomZ = K / (H * 1.25 - horizonY);
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, horizonY, W, H - horizonY);
+    ctx.clip();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineCap = 'butt';
+
+    for (let i = 1; i <= CFG.rowCount; i++) {
+      const z = i * step - zOffset;
+      if (z <= bottomZ) continue;
+      const y = horizonY + K / z;
+      if (y > H + 2) continue;
+      const d = (y - horizonY) / (H - horizonY);   // 0 = Horizont, 1 = unten
+      if (d < 0.016) break;                        // ganz ferne Linien weglassen
+      const fade = Math.pow(clamp(d, 0, 1), 0.60);
+      const col = mixColor(clamp(1 - d * 3.4, 0, 1));
+
+      if (d > 0.10) {                              // Schein nur für nahe Linien
+        ctx.strokeStyle = 'rgba(' + col + ',' + (0.085 * fade).toFixed(3) + ')';
+        ctx.lineWidth = 7 * clamp(d * 1.4, 0.25, 1);
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+      }
+
+      ctx.strokeStyle = 'rgba(' + col + ',' + (0.92 * fade).toFixed(3) + ')';
+      ctx.lineWidth = clamp(d * 2.1, 0.7, 2.0);
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function frame(now) {
+    const t = now / 1000;
+    let dt = lastT ? t - lastT : 0;
+    lastT = t;
+    if (dt > 0.1) dt = 0.1;          // nach einem Tab-Wechsel nicht springen
+
+    zOffset = (zOffset + dt * CFG.speed * speedMul) % CFG.rowStep;
+
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    ctx.drawImage(bgLayer.el, 0, 0, W, H);
+    drawTwinkle(t);
+    drawRows();
+
+    // Nur den Bereich unter dem Horizont kopieren - dort stehen die Längslinien
+    ctx.globalCompositeOperation = 'lighter';
+    const gh = H - horizonY;
+    ctx.drawImage(colLayer.el,
+      0, horizonY * dpr, W * dpr, gh * dpr,
+      0, horizonY,       W,       gh);
+    ctx.globalCompositeOperation = 'source-over';
+
+    requestAnimationFrame(frame);
+  }
+
+  // ---------------------------------------------------------------- Bedienung
+  const fsBtn = document.getElementById('fsBtn');
+
+  const isFullscreen = () => !!(document.fullscreenElement || document.webkitFullscreenElement);
+
+  function toggleFullscreen() {
+    const el = document.documentElement;
+    if (isFullscreen()) {
+      const exit = document.exitFullscreen || document.webkitExitFullscreen;
+      if (exit) exit.call(document);
+    } else {
+      const req = el.requestFullscreen || el.webkitRequestFullscreen;
+      if (req) {
+        const p = req.call(el, { navigationUI: 'hide' });
+        if (p && p.catch) p.catch(() => {});
+      }
+    }
+  }
+  function syncBtn() { fsBtn.textContent = isFullscreen() ? 'Beenden' : 'Vollbild'; }
+
+  fsBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleFullscreen(); });
+  document.addEventListener('fullscreenchange', syncBtn);
+  document.addEventListener('webkitfullscreenchange', syncBtn);
+  document.addEventListener('dblclick', toggleFullscreen);
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'f' || e.key === 'F') toggleFullscreen();
+    else if (e.key === 'ArrowUp')   { speedMul = clamp(speedMul * 1.25, 0.1, 8); e.preventDefault(); }
+    else if (e.key === 'ArrowDown') { speedMul = clamp(speedMul / 1.25, 0.1, 8); e.preventDefault(); }
+    else if (e.key === ' ')         { speedMul = speedMul === 0 ? 1 : 0; e.preventDefault(); }
+  });
+
+  // Mauszeiger und Bedienelemente nach kurzer Untätigkeit ausblenden
+  let idleTimer = 0;
+  function wake() {
+    document.body.classList.remove('idle');
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => document.body.classList.add('idle'), 2800);
+  }
+  ['pointermove', 'pointerdown', 'keydown', 'wheel'].forEach(ev =>
+    window.addEventListener(ev, wake, { passive: true }));
+
+  // Beim Resize die Ebenen nicht bei jedem Pixel neu bauen
+  let rsTimer = 0;
+  function onResize() {
+    clearTimeout(rsTimer);
+    rsTimer = setTimeout(resize, 120);
+  }
+  window.addEventListener('resize', onResize);
+  window.addEventListener('orientationchange', () => setTimeout(resize, 200));
+
+  resize();
+  syncBtn();
+  wake();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f2ece1">
+<meta name="description" content="Endlose 80er-Animation im Memphis-Stil: wanderndes Muster aus Zickzack, Kreisen und Konfetti.">
+<title>Memphis Pop</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #f2ece1;
+    overflow: hidden;
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body.idle { cursor: none; }
+
+  #stage { position: fixed; inset: 0; }
+  canvas { display: block; width: 100%; height: 100%; }
+
+  /* Feines Korn, damit die Flächen nicht steril wirken */
+  #grain {
+    position: fixed; inset: 0;
+    pointer-events: none;
+    opacity: .05;
+    background-repeat: repeat;
+  }
+
+  #ui {
+    position: fixed;
+    right: max(16px, env(safe-area-inset-right));
+    bottom: max(16px, env(safe-area-inset-bottom));
+    display: flex; gap: 10px;
+    transition: opacity .4s ease;
+    z-index: 10;
+  }
+  body.idle #ui { opacity: 0; pointer-events: none; }
+
+  .btn {
+    font: 700 13px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: #1b1a1f;
+    background: #ffd23f;
+    border: 2.5px solid #1b1a1f;
+    border-radius: 999px;
+    padding: 10px 18px;
+    cursor: pointer;
+    box-shadow: 4px 4px 0 #1b1a1f;
+    transition: transform .12s ease, box-shadow .12s ease, background .2s;
+  }
+  .btn:hover, .btn:focus-visible {
+    background: #ff4d9d;
+    color: #fff;
+    outline: none;
+  }
+  .btn:active { transform: translate(3px, 3px); box-shadow: 1px 1px 0 #1b1a1f; }
+
+  #hint {
+    position: fixed;
+    left: 50%; bottom: max(24px, env(safe-area-inset-bottom));
+    transform: translateX(-50%);
+    font: 700 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: #1b1a1f;
+    background: rgba(242, 236, 225, .78);
+    padding: 7px 12px;
+    border-radius: 999px;
+    pointer-events: none;
+    transition: opacity .6s ease;
+    z-index: 9;
+  }
+  body.dark #hint { color: #f2ece1; background: rgba(21, 19, 28, .78); }
+  body.idle #hint { opacity: 0; }
+
+  @media (max-width: 560px) {
+    .btn { padding: 9px 14px; font-size: 11px; }
+    #hint { display: none; }
+  }
+</style>
+</head>
+<body>
+  <div id="stage"><canvas id="c"></canvas></div>
+  <div id="grain"></div>
+
+  <div id="ui"><button class="btn" id="fsBtn" type="button">Vollbild</button></div>
+  <div id="hint">F Vollbild &nbsp;·&nbsp; ↑ ↓ Tempo &nbsp;·&nbsp; Leertaste Pause &nbsp;·&nbsp; D Hell/Dunkel</div>
+
+<script>
+(() => {
+  'use strict';
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+
+  // ---------------------------------------------------------------- Konfiguration
+  const CFG = {
+    cell:      168,   // Rastermaß in Pixeln bei 1080p, skaliert mit der Bildgröße
+    jitter:    0.24,  // wie weit eine Form aus ihrer Rasterzelle wandern darf
+    sizeMin:   0.42,  // Formgröße als Anteil der Zelle
+    sizeMax:   0.78,
+    speed:     34,    // Wandergeschwindigkeit in Pixeln pro Sekunde
+    angleDeg:  208,   // Richtung, in die das Muster zieht
+    spin:      0.20,  // Eigendrehung der Formen
+    breathe:   0.055, // leichtes Pulsieren der Größe
+    margin:    2      // zusätzlich gezeichnete Zellen ringsum, gegen Aufpoppen
+  };
+
+  const COLORS = ['#ff4d9d', '#2ec4c6', '#ffd23f', '#7b5cff', '#ff7a3d'];
+  const THEMES = {
+    light: { bg: '#f2ece1', ink: '#1b1a1f' },
+    dark:  { bg: '#15131c', ink: '#f4eee3' }
+  };
+
+  // ---------------------------------------------------------------- Zustand
+  let W = 0, H = 0, dpr = 1, cell = CFG.cell, scale = 1;
+  let speedMul = 1, lastT = 0;
+  let travel = 0;                       // zurückgelegte Strecke des Musters
+  let theme = THEMES.light;
+  const TAU = Math.PI * 2;
+  const clamp = (v, a, b) => v < a ? a : (v > b ? b : v);
+
+  // Ganzzahl-Hash: jede Zelle im unendlichen Raster bekommt daraus dauerhaft
+  // ihre Form, Farbe, Größe und Lage. Da alles an der Weltposition hängt und
+  // nicht am Bildausschnitt, wandert das Muster endlos weiter, ohne sich zu
+  // wiederholen und ohne beim Nachrücken zu springen.
+  function hash(x, y) {
+    let h = (Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263)) | 0;
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    return (h ^ (h >>> 16)) >>> 0;
+  }
+  // Einzelne Zufallswerte aus einem Hash herausziehen
+  const pick = (h, k) => ((h >>> (k * 5)) & 1023) / 1024;
+
+  // ---------------------------------------------------------------- Formen
+  // Jede Form sitzt zentriert im Ursprung und ist s Einheiten breit.
+  function shape(c, id, s, col, ink) {
+    const lw = s * 0.13;
+    c.lineCap = 'round';
+    c.lineJoin = 'round';
+    c.strokeStyle = col;
+    c.fillStyle = col;
+    c.lineWidth = lw;
+
+    switch (id) {
+      case 0: {                                   // Welle
+        c.strokeStyle = ink;
+        c.lineWidth = s * 0.115;
+        c.beginPath();
+        for (let i = 0; i <= 24; i++) {
+          const x = -s / 2 + (s * i) / 24;
+          const y = Math.sin((i / 24) * TAU * 1.5) * s * 0.17;
+          i ? c.lineTo(x, y) : c.moveTo(x, y);
+        }
+        c.stroke();
+        break;
+      }
+      case 1:                                     // gefüllter Kreis
+        c.beginPath(); c.arc(0, 0, s * 0.42, 0, TAU); c.fill();
+        break;
+      case 2: {                                   // Halbkreis
+        c.beginPath();
+        c.arc(0, s * 0.18, s * 0.46, Math.PI, TAU);
+        c.closePath(); c.fill();
+        break;
+      }
+      case 3:                                     // Dreieck
+        c.beginPath();
+        c.moveTo(0, -s * 0.45);
+        c.lineTo(s * 0.45, s * 0.36);
+        c.lineTo(-s * 0.45, s * 0.36);
+        c.closePath(); c.fill();
+        break;
+      case 4: {                                   // Zickzack
+        c.beginPath();
+        const n = 4, step = s / n;
+        for (let i = 0; i <= n; i++) {
+          const x = -s / 2 + step * i;
+          const y = (i % 2 ? 1 : -1) * s * 0.20;
+          i ? c.lineTo(x, y) : c.moveTo(x, y);
+        }
+        c.stroke();
+        break;
+      }
+      case 5: {                                   // Punktraster
+        const g = 3, d = s * 0.085, sp = s * 0.30;
+        for (let i = 0; i < g; i++) for (let j = 0; j < g; j++) {
+          c.beginPath();
+          c.arc((i - 1) * sp, (j - 1) * sp, d, 0, TAU);
+          c.fill();
+        }
+        break;
+      }
+      case 6: {                                   // Kreuz
+        const a = s * 0.44, b = s * 0.15;
+        c.beginPath();
+        c.rect(-b, -a, b * 2, a * 2);
+        c.rect(-a, -b, a * 2, b * 2);
+        c.fill();
+        break;
+      }
+      case 7:                                     // Viertelbogen
+        c.lineWidth = s * 0.17;
+        c.lineCap = 'butt';
+        c.beginPath();
+        c.arc(-s * 0.32, s * 0.32, s * 0.62, -Math.PI / 2, 0);
+        c.stroke();
+        break;
+      case 8: {                                   // gestreiftes Quadrat
+        const q = s * 0.44;
+        c.save();
+        c.beginPath(); c.rect(-q, -q, q * 2, q * 2); c.clip();
+        c.strokeStyle = ink;
+        c.lineWidth = s * 0.10;
+        c.beginPath();
+        for (let x = -q * 2; x < q * 2; x += s * 0.20) {
+          c.moveTo(x, -q * 1.5);
+          c.lineTo(x + q * 1.5, q * 1.5);
+        }
+        c.stroke();
+        c.restore();
+        c.strokeStyle = ink;
+        c.lineWidth = s * 0.07;
+        c.strokeRect(-q, -q, q * 2, q * 2);
+        break;
+      }
+      case 9:                                     // Ringe
+        c.lineWidth = s * 0.10;
+        c.beginPath(); c.arc(0, 0, s * 0.44, 0, TAU); c.stroke();
+        c.beginPath(); c.arc(0, 0, s * 0.24, 0, TAU); c.stroke();
+        break;
+    }
+  }
+  const SHAPES = 10;
+
+  // ---------------------------------------------------------------- Korn
+  function buildGrain() {
+    const n = 96;
+    const el = document.createElement('canvas');
+    el.width = el.height = n;
+    const c = el.getContext('2d');
+    const img = c.createImageData(n, n);
+    for (let i = 0; i < img.data.length; i += 4) {
+      const v = (Math.random() * 255) | 0;
+      img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
+      img.data[i + 3] = 255;
+    }
+    c.putImageData(img, 0, 0);
+    document.getElementById('grain').style.backgroundImage = 'url(' + el.toDataURL() + ')';
+  }
+
+  // ---------------------------------------------------------------- Resize
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = Math.max(1, window.innerWidth);
+    H = Math.max(1, window.innerHeight);
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    // Rastermaß an die Bildgröße koppeln, damit auf dem Handy nicht nur
+    // zwei Formen im Bild stehen
+    scale = clamp(Math.min(W, H) / 1080, 0.42, 1.5);
+    cell = CFG.cell * scale;
+  }
+
+  // ---------------------------------------------------------------- Zeichnen
+  function draw(t) {
+    const a = CFG.angleDeg * Math.PI / 180;
+    const ox = Math.cos(a) * travel;
+    const oy = Math.sin(a) * travel;
+
+    ctx.fillStyle = theme.bg;
+    ctx.fillRect(0, 0, W, H);
+
+    const m = CFG.margin;
+    const cols = Math.ceil(W / cell) + m * 2;
+    const rows = Math.ceil(H / cell) + m * 2;
+    // Welt-Index der linken oberen gezeichneten Zelle
+    const baseX = Math.floor(ox / cell) - m;
+    const baseY = Math.floor(oy / cell) - m;
+    const fracX = ox - Math.floor(ox / cell) * cell;
+    const fracY = oy - Math.floor(oy / cell) * cell;
+
+    for (let gy = 0; gy <= rows; gy++) {
+      for (let gx = 0; gx <= cols; gx++) {
+        const wx = baseX + gx, wy = baseY + gy;
+        const h = hash(wx, wy);
+
+        // Etwa jede sechste Zelle bleibt leer - sonst wirkt es zu dicht
+        if (pick(h, 0) < 0.16) continue;
+
+        const px = (gx - m) * cell - fracX + cell * (0.5 + (pick(h, 1) - 0.5) * CFG.jitter * 2);
+        const py = (gy - m) * cell - fracY + cell * (0.5 + (pick(h, 2) - 0.5) * CFG.jitter * 2);
+
+        const id = (h >>> 24) % SHAPES;
+        const col = COLORS[(h >>> 20) % COLORS.length];
+        const base = CFG.sizeMin + pick(h, 3) * (CFG.sizeMax - CFG.sizeMin);
+        const dir = pick(h, 4) < 0.5 ? -1 : 1;
+        const rot = pick(h, 5) * TAU + dir * t * CFG.spin * (0.4 + pick(h, 6));
+        const puls = 1 + CFG.breathe * Math.sin(t * (0.5 + pick(h, 6) * 0.9) + pick(h, 5) * TAU);
+        const s = cell * base * puls;
+
+        ctx.save();
+        ctx.translate(px, py);
+        ctx.rotate(rot);
+        shape(ctx, id, s, col, theme.ink);
+        ctx.restore();
+      }
+    }
+  }
+
+  function frame(now) {
+    const t = now / 1000;
+    let dt = lastT ? t - lastT : 0;
+    lastT = t;
+    if (dt > 0.1) dt = 0.1;
+
+    travel += dt * CFG.speed * speedMul * scale;
+    draw(t);
+    requestAnimationFrame(frame);
+  }
+
+  // ---------------------------------------------------------------- Bedienung
+  const fsBtn = document.getElementById('fsBtn');
+  const isFullscreen = () => !!(document.fullscreenElement || document.webkitFullscreenElement);
+
+  function toggleFullscreen() {
+    const el = document.documentElement;
+    if (isFullscreen()) {
+      const exit = document.exitFullscreen || document.webkitExitFullscreen;
+      if (exit) exit.call(document);
+    } else {
+      const req = el.requestFullscreen || el.webkitRequestFullscreen;
+      if (req) {
+        const p = req.call(el, { navigationUI: 'hide' });
+        if (p && p.catch) p.catch(() => {});
+      }
+    }
+  }
+  function syncBtn() { fsBtn.textContent = isFullscreen() ? 'Beenden' : 'Vollbild'; }
+
+  function setTheme(name) {
+    theme = THEMES[name];
+    document.body.classList.toggle('dark', name === 'dark');
+    document.documentElement.style.background = theme.bg;
+    document.body.style.background = theme.bg;
+  }
+
+  fsBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleFullscreen(); });
+  document.addEventListener('fullscreenchange', syncBtn);
+  document.addEventListener('webkitfullscreenchange', syncBtn);
+  document.addEventListener('dblclick', toggleFullscreen);
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'f' || e.key === 'F') toggleFullscreen();
+    else if (e.key === 'd' || e.key === 'D') setTheme(theme === THEMES.light ? 'dark' : 'light');
+    else if (e.key === 'ArrowUp')   { speedMul = clamp(speedMul * 1.25, 0.1, 8); e.preventDefault(); }
+    else if (e.key === 'ArrowDown') { speedMul = clamp(speedMul / 1.25, 0.1, 8); e.preventDefault(); }
+    else if (e.key === ' ')         { speedMul = speedMul === 0 ? 1 : 0; e.preventDefault(); }
+  });
+
+  let idleTimer = 0;
+  function wake() {
+    document.body.classList.remove('idle');
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => document.body.classList.add('idle'), 2800);
+  }
+  ['pointermove', 'pointerdown', 'keydown', 'wheel'].forEach(ev =>
+    window.addEventListener(ev, wake, { passive: true }));
+
+  let rsTimer = 0;
+  window.addEventListener('resize', () => {
+    clearTimeout(rsTimer);
+    rsTimer = setTimeout(resize, 120);
+  });
+  window.addEventListener('orientationchange', () => setTimeout(resize, 200));
+
+  buildGrain();
+  setTheme('light');
+  resize();
+  syncBtn();
+  wake();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
